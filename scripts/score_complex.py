@@ -1,88 +1,115 @@
-import shutil
+#!/usr/bin/env python3
 import subprocess
 import pandas as pd
+from Bio.PDB import PDBParser, PDBIO, Structure, Model
 from pathlib import Path
-import tempfile
 import os
 import sys
 
-def score_complex(pdb_path: str, n_cores: int = os.cpu_count()) -> dict:
-    pdb_file = Path(pdb_path)
+def score_complex(pdb_path: str, ligand_chain: str, n_cores: int = os.cpu_count()) -> dict:
+    app_dir = Path("/app")
+    pdb_file = Path(pdb_path).resolve()
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        shutil.copy(pdb_file, temp_path)
-        complex_pdb = pdb_file.name
+    if not pdb_file.exists():
+        print(f"Error: PDB file '{pdb_file}' not found.")
+        return {}
 
-        ## Extract ligand from the PDB file
-        print("Extracting ligand from PDB file...")
-        ligand_pdb = temp_path / "ligand.pdb"
-        with open(temp_path / complex_pdb) as infile, open(ligand_pdb, "w") as outfile:
-            for line in infile:
-                if line.startswith("ATOM") or line.startswith("HETATM"):
-                    if line[21] == "B":
-                        outfile.write(line)
+    ## Parse the PDB file to extract the ligand
+    print("Parsing PDB file to extract ligand...") 
+    ligand_pdb = app_dir / "ligand.pdb"
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("protein_structure", str(pdb_file))
 
-        ## Run ACPYPE on ligand to generate topology files
-        print("Running ACPYPE to generate ligand topology files...")
-        command = ["acpype", "-i", ligand_pdb, "-o," "cns"]
-        try:
-            subprocess.run(command, capture_output=True, text=True, check=True, cwd=temp_path)
-        except subprocess.CalledProcessError as e:
-            print("ACPYPE Error occurred:", e.stderr)
-            return {}
+    extracted_chain = None
+    for model in structure:
+        for chain in model:
+            if chain.get_id().strip().upper() == ligand_chain:
+                extracted_chain = chain
+                break
+        if extracted_chain:
+            break
 
-        ## Create a configuration file for HADDOCK3 scoring
-        cfg_body = f'''
-        ## Docked protein complex scoring
-        run_dir = "run0"
-        mode = "local"
-        ncores = {n_cores}
-        molecules =  [
-            "{complex_pdb}"
-            ]
-        [topoaa]
-        autohis = true
-        ligand_param_fname = f"{temp_path}/ligand.acpype/ligand_CNS.par"
-        ligand_top_fname = f"{temp_path}/ligand.acpype/ligand_CNS.top"
-        [mdscoring]
-        ligand_param_fname = f"{temp_path}/ligand.acpype/ligand_CNS.par"
-        ligand_top_fname = f"{temp_path}/ligand.acpype/ligand_CNS.top"
-        nemsteps = 1
-        per_interface_scoring = false
-        '''
+    if not extracted_chain:
+        print(f"Chain '{ligand_chain}' not found in '{pdb_file.name}'")
+        return {}
+    
+    # Wrap chain into new structure
+    new_structure = Structure.Structure("ligand_only")
+    new_model = Model.Model(0)
+    new_model.add(extracted_chain.copy())
+    new_structure.add(new_model)
 
-        cfg_file = temp_path / "score.cfg"
-        cfg_file.write_text(cfg_body.strip())
+    io = PDBIO()
+    io.set_structure(new_structure)
+    io.save(str(ligand_pdb))
+    print(f"Chain '{ligand_chain}' extracted to '{ligand_pdb}'")
 
-        ## Run HADDOCK3 scoring
-        print("Running HADDOCK3 scoring...")
-        try:
-            command = ["haddock3", str(cfg_file)]
-            subprocess.run(command, capture_output=True, text=True, check=True, cwd=temp_path)
 
-            capri_file = temp_path / "run0/analysis/1_mdscoring_analysis/capri_ss.tsv"
-            capri_ss = pd.read_csv(capri_file, sep="\t")
-            metrics = capri_ss[['score', 'total', 'vdw', 'elec', 'desolv', 'bsa']].iloc[0].to_dict()
-            return metrics
+    ## Run ACPYPE on ligand to generate topology files
+    print("Running ACPYPE...")
+    try:
+        subprocess.run(
+            ["acpype", "-i", str(ligand_pdb), "-o", "cns"],
+            capture_output=True, text=True, check=True, cwd=app_dir
+        )
+    except subprocess.CalledProcessError as e:
+        print("ACPYPE Error:", e.stderr)
+        return {}
 
-        except subprocess.CalledProcessError as e:
-            print("HADDOCK3 Error occurred:", e.stderr)
-            return {}
+    ## Create a configuration file for HADDOCK3 scoring
+    cfg_body = f'''
+    ## Docked protein complex scoring
+    run_dir = "run0"
+    mode = "local"
+    ncores = {n_cores}
+    molecules =  [
+        "{pdb_file}"
+        ]
+    [topoaa]
+    autohis = true
+    ligand_param_fname = "{app_dir}/ligand.acpype/ligand_CNS.par"
+    ligand_top_fname = "{app_dir}/ligand.acpype/ligand_CNS.top"
+    [mdscoring]
+    ligand_param_fname = "{app_dir}/ligand.acpype/ligand_CNS.par"
+    ligand_top_fname = "{app_dir}/ligand.acpype/ligand_CNS.top"
+    nemsteps = 1
+    per_interface_scoring = false
+    '''
 
-        except Exception as e:
-            print("Unexpected error:", e)
-            return {}
+    cfg_file = app_dir / "score.cfg"
+    cfg_file.write_text(cfg_body.strip())
+
+    ## Run HADDOCK3 scoring
+    print("Running HADDOCK3 scoring...")
+    try:
+        subprocess.run(
+            ["haddock3", str(cfg_file)],
+            capture_output=True, text=True, check=True, cwd=app_dir
+        )
+
+        capri_file = app_dir / "run0/analysis/1_mdscoring_analysis/capri_ss.tsv"
+        capri_ss = pd.read_csv(capri_file, sep="\t")
+        metrics = capri_ss[['score', 'total', 'vdw', 'elec', 'desolv', 'bsa']].iloc[0].to_dict()
+
+    except subprocess.CalledProcessError as e:
+        print("HADDOCK3 Error:", e.stderr)
+        return {}
+    except Exception as e:
+        print("Unexpected error:", e)
+        return {}
+    
+    return metrics
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python score_complex.py <pdb_path> [n_cores]")
+        print("Usage: python score_complex.py <pdb_path> <ligand_chain> [n_cores]")
         sys.exit(1)
 
     pdb_path = sys.argv[1]
-    n_cores = int(sys.argv[2]) if len(sys.argv) > 2 else os.cpu_count()
+    ligand_chain = sys.argv[2].strip().upper()
+    n_cores = int(sys.argv[3]) if len(sys.argv) > 3 else os.cpu_count()
 
-    metrics = score_complex(pdb_path, n_cores)
+    metrics = score_complex(pdb_path, ligand_chain, n_cores)
     if metrics:
         print("Scoring metrics:", metrics)
     else:

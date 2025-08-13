@@ -1,14 +1,24 @@
-# Use a base image with Python 3 already installed
-FROM acpype/acpype:latest
+# Base image with conda
+FROM continuumio/miniconda3
 
-# Set the working directory inside the container
+# Set working directory
 WORKDIR /app
 
-# Install Python libraries
-RUN pip install haddock3 pandas
+# Install system dependencies for haddock3/freesasa build
+RUN apt-get update && \
+    apt-get install -y build-essential libxml2-dev libgsl-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy scripts into container
+# Create and activate conda env with Python 3.9
+RUN conda create -n ligandbind_env python=3.9 -y && \
+    conda clean --all -f -y
+
+# Install dependencies inside the env
+RUN conda run -n ligandbind_env conda install -c conda-forge acpype && \
+    conda run -n ligandbind_env pip install haddock3 pandas biopython
+
+# Copy your Python script into the container
 COPY scripts/ /app/scripts/
 
-# Run python script for protein-ligand binding affinity prediction
-CMD ["python", "scripts/score_complex.py"]
+# Ensure conda env is used by default
+ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "ligandbind_env", "python", "/app/scripts/score_complex.py"]
