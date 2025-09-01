@@ -1,4 +1,4 @@
-# Predictin HADDOCK Binding Affinity for Ligands (PHaBAL)
+# Predicting HADDOCK Binding Affinity for Ligands (PHaBAL)
 
 We are creating a docker container that will house ACPYPE and HADDOCK3. The purpose of the container will be to run the phsyics based molecular dynamics simulations of HADDOCK3 to produce the binding affinity metrics (Van der Waals, Electrostatic Energy, etc.) for any provided docked structure of a protein and small molecule ligand. 
 
